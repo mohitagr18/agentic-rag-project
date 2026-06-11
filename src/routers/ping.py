@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from sqlalchemy import text
 
-from ..dependencies import DatabaseDep, OpenSearchDep, SettingsDep
+from ..dependencies import DatabaseDep, OpenSearchDep, SettingsDep, CacheDep, LangfuseDep
 from ..schemas.api.health import HealthResponse, ServiceStatus
 from ..services.openai_llm.client import OpenAILLMClient
 
@@ -9,7 +9,13 @@ router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health_check(settings: SettingsDep, database: DatabaseDep, opensearch_client: OpenSearchDep) -> HealthResponse:
+async def health_check(
+    settings: SettingsDep,
+    database: DatabaseDep,
+    opensearch_client: OpenSearchDep,
+    cache_client: CacheDep,
+    langfuse_tracer: LangfuseDep,
+) -> HealthResponse:
     """Comprehensive health check endpoint for monitoring and load balancer probes.
 
     :returns: Service health status with version and connectivity checks
@@ -48,9 +54,27 @@ async def health_check(settings: SettingsDep, database: DatabaseDep, opensearch_
             message=f"Index '{stats.get('index_name', 'unknown')}' with {stats.get('document_count', 0)} documents",
         )
 
+    # Redis check
+    def _check_redis():
+        if cache_client is None:
+            return ServiceStatus(status="disabled", message="Cache client is not configured")
+        try:
+            cache_client.redis.ping()
+            return ServiceStatus(status="healthy", message="Connected successfully")
+        except Exception as e:
+            return ServiceStatus(status="unhealthy", message=f"Redis ping failed: {e}")
+
+    # Langfuse check
+    def _check_langfuse():
+        if langfuse_tracer is None or not langfuse_tracer.client:
+            return ServiceStatus(status="disabled", message="Langfuse tracer is disabled or missing credentials")
+        return ServiceStatus(status="healthy", message="Tracer initialized successfully")
+
     # Run synchronous checks
     _check_service("database", _check_database)
     _check_service("opensearch", _check_opensearch)
+    _check_service("redis", _check_redis)
+    _check_service("langfuse", _check_langfuse)
 
     # OpenAI API health check
     try:
